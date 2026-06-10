@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Generated maps
+*.png
+*.html
+
+# Service logs
+service_output.log
+service_error.log
+
+# Local data (donor CSVs should never be committed)
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
