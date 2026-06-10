@@ -21,6 +21,16 @@ python app.py
 
 The API listens on `http://localhost:5000`.
 
+## Deploying updates to the production PC
+
+The PC running the service should be a git clone of this repo (one-time setup):
+
+```bash
+git clone https://github.com/AlteonSolutions/DonorHeatMaps.git C:\DonorMaps
+```
+
+After that, run [`update.bat`](update.bat) on the PC whenever the repo changes — it pulls the latest code, installs any new dependencies, and restarts the `DonorMapsAPI` service. It can be run manually, scheduled in Task Scheduler, or triggered from a Power Automate "Run application" block.
+
 ## API
 
 ### `GET /api/health`
