@@ -272,7 +272,7 @@ def create_folium_map(data, zoom_level='continental', output_file='heatmap.png',
         center_lon = np.median(lons)
 
     if zoom_level == 'continental':
-        zoom = 5.8
+        zoom = 5.25
         center_lat = 39.0
         center_lon = -96.0
     elif zoom_level == 'regional':
@@ -641,8 +641,8 @@ if __name__ == '__main__':
     print("DONATION HEAT MAP API")
     print("=" * 70)
     print("\nGenerates PNG images + interactive HTML:")
-    print("  1. All Donors (zoom 5.8)")
-    print("  2. Major Donors (zoom 5.8) - optional")
+    print("  1. All Donors (zoom 5.25)")
+    print("  2. Major Donors (zoom 5.25) - optional")
     print("  3. Regional (zoom 9)")
     print("  4. Local (zoom 13.25)")
     print("  5. Interactive HTML (zoom 12.5, toggleable layers)")

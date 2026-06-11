@@ -148,8 +148,8 @@ type C:\DonorMaps\service_error.log
 
 **Important:** Regional and Local are **NOT geographic boundaries**. They are zoom levels applied to all input data.
 
-- **All Donors:** Continental view (zoom 5.8) at US center
-- **Major Donors:** Continental view (zoom 5.8) at US center (separate data)
+- **All Donors:** Continental view (zoom 5.25) at US center
+- **Major Donors:** Continental view (zoom 5.25) at US center (separate data)
 - **Regional:** Same data as All Donors, zoomed to 9, centered on highest-concentration ZIP
 - **Local:** Same data as All Donors, zoomed to 13.25, centered on highest-concentration ZIP
 
