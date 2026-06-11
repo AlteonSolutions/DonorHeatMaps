@@ -9,9 +9,12 @@ env/
 *.png
 *.html
 
-# Service logs
+# PC-local service files (live in the deploy folder but not in git)
 service_output.log
 service_error.log
+nssm.exe
+playwright-browsers/
+api_request.json
 
 # Local data (donor CSVs should never be committed)
 *.csv

@@ -7,6 +7,10 @@ REM   git clone https://github.com/AlteonSolutions/DonorHeatMaps.git C:\DonorMap
 
 cd /d %~dp0
 
+REM Use the service's venv python if present, otherwise whatever is on PATH
+set PYTHON=python
+if exist "%~dp0venv\Scripts\python.exe" set PYTHON=%~dp0venv\Scripts\python.exe
+
 echo Stopping service...
 net stop DonorMapsAPI
 
@@ -19,7 +23,7 @@ if errorlevel 1 (
 )
 
 echo Installing dependencies...
-python -m pip install -r requirements.txt --quiet
+"%PYTHON%" -m pip install -r requirements.txt --quiet
 
 echo Starting service...
 net start DonorMapsAPI
