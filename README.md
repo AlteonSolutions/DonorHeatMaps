@@ -57,6 +57,19 @@ Generates all maps from a CSV file on disk.
 
 **CSV format:** delimiter is auto-detected (comma or tab), first row is treated as a header, and at least 6 columns are expected: `ID, Name, Street, City, State, Zip, Giving`.
 
+**Partial addresses are supported.** Each row is placed as precisely as its data allows:
+
+| Row has | Placement |
+|---|---|
+| Street + (ZIP or City/State) | Census Geocoder (street-level) |
+| ZIP only | ZIP centroid (offline lookup, bundled in `data/`) |
+| City + State only | City centroid (offline lookup) |
+| None of the above | Skipped |
+
+If the Census Geocoder finds no match for a full address, it falls back to the ZIP/city centroid instead of dropping the donor. Centroid-placed donors get extra positional jitter (~0.5 mi for ZIP, ~1.5 mi for city) so they scatter naturally instead of stacking on one point. The API response includes a `precision` breakdown of how donors were placed.
+
+**Failure signal:** if no maps can be generated for any reason (CSV missing, unreadable, no usable addresses, nothing geocoded, unexpected error), the API writes `NO MAPS GENERATED.txt` into the output directory with the reason. Power Automate flows can wait for either the PNGs or this marker file instead of stalling. The marker is cleared automatically at the start of each run.
+
 ### Expected Outputs
 
 Files generated in your Donor Maps folder:
@@ -65,6 +78,11 @@ Files generated in your Donor Maps folder:
 - `Regional Donors.png`
 - `Local Donors.png`
 - `Interactive Donor Map.html`
+
+Or, if generation failed:
+- `NO MAPS GENERATED.txt` (contains the failure reason)
+
+The interactive HTML includes toggleable layers: **Heat Map (Donors)** (on by default), **Heat Map (by Giving)** (weighted by donation amount, off by default — only present if the Giving column has values), and **Markers**.
 
 ---
 
@@ -150,13 +168,12 @@ type C:\DonorMaps\service_error.log
 
 ### Exclusions
 
-**Addresses are skipped if:**
-- Street address is blank
-- City is blank
-- State is blank
-- ZIP code is blank
-- ZIP code is non-numeric (first 5 chars)
-- Geocoding fails (address not found by Census API)
+**Addresses are skipped only if:**
+- Street, ZIP, and City/State are ALL missing (nothing to place the donor with)
+- ZIP is non-numeric AND no other usable location data exists
+- Geocoding fails at every level (no Census match, ZIP not in centroid table, city not in centroid table)
+
+Rows missing a street address are no longer skipped — they fall back to ZIP or city centroid placement (see the API section above).
 
 ---
 
