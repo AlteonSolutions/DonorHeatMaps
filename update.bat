@@ -5,11 +5,20 @@ REM (service stop/start requires elevation).
 REM One-time setup: install Git for Windows, then clone the repo into the service folder:
 REM   git clone https://github.com/AlteonSolutions/DonorHeatMaps.git C:\DonorMaps
 
-cd /d %~dp0
+REM cmd reads batch files from disk as it runs them, so if git pull updates
+REM this file mid-run, execution gets corrupted. Re-launch a copy from %TEMP%
+REM so the file git changes is not the one being executed.
+if "%~1"=="--from-temp" goto main
+copy /y "%~f0" "%TEMP%\donormaps_update.bat" >nul
+call "%TEMP%\donormaps_update.bat" --from-temp "%~dp0"
+exit /b %errorlevel%
+
+:main
+cd /d "%~2"
 
 REM Use the service's venv python if present, otherwise whatever is on PATH
-set PYTHON=python
-if exist "%~dp0venv\Scripts\python.exe" set PYTHON=%~dp0venv\Scripts\python.exe
+set "PYTHON=python"
+if exist "venv\Scripts\python.exe" set "PYTHON=%CD%\venv\Scripts\python.exe"
 
 echo Stopping service...
 net stop DonorMapsAPI
