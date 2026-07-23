@@ -15,6 +15,7 @@ from playwright.async_api import async_playwright
 import requests
 import time
 import csv
+import re
 from io import StringIO
 
 app = Flask(__name__)
@@ -307,13 +308,72 @@ def nearest_place(geocoded, lat, lon):
     """Return the geocoded donor closest to (lat, lon), for labeling."""
     return min(geocoded, key=lambda d: (d['lat'] - lat) ** 2 + (d['lon'] - lon) ** 2)
 
+def org_name_from_path(output_directory):
+    """Best-effort org name from the output path. The expected layout is
+    ...\\<Org Name>\\<timestamp>\\Donor Maps, so the org name is the folder
+    just before a timestamp segment like '2026.7.22 11.41'. Returns None if
+    it can't be determined confidently."""
+    if not output_directory:
+        return None
+    parts = [p for p in re.split(r'[\\/]+', output_directory.strip()) if p]
+    if not parts:
+        return None
+    if parts[-1].lower() == 'donor maps':
+        parts = parts[:-1]
+    if not parts:
+        return None
+    ts = re.compile(r'^\d{4}\.\d{1,2}\.\d{1,2}([ ._-].*)?$')
+    if len(parts) >= 2 and ts.match(parts[-1]):
+        return parts[-2]
+    if ts.match(parts[-1]):
+        return None
+    return parts[-1]
+
+def lookup_org_center(org_name):
+    """Look up a nonprofit's HQ city/state via the ProPublica Nonprofit
+    Explorer API (free, no key; data sourced from IRS filings) and return a
+    center dict, or None if no confident match. Regional/local maps then
+    center on where the ORG is, not where its donors happen to be densest."""
+    if not org_name:
+        return None
+    try:
+        resp = requests.get(
+            "https://projects.propublica.org/nonprofits/api/v2/search.json",
+            params={'q': org_name}, timeout=10)
+        if resp.status_code != 200:
+            print(f"  Org HQ lookup: ProPublica returned HTTP {resp.status_code}")
+            return None
+        orgs = resp.json().get('organizations', [])
+        if not orgs:
+            print(f"  Org HQ lookup: no nonprofit match for '{org_name}'")
+            return None
+        best = orgs[0]
+        city = (best.get('city') or '').strip()
+        state = (best.get('state') or '').strip()
+        if not city or not state:
+            return None
+        key = (city.upper(), state_abbrev(state))
+        if key not in CITY_CENTROIDS:
+            print(f"  Org HQ lookup: matched '{best.get('name')}' in {city}, {state} "
+                  f"but no centroid for that city")
+            return None
+        lat, lon = CITY_CENTROIDS[key]
+        print(f"  Center: org HQ '{best.get('name')}' in {city}, {state} (ProPublica)")
+        return {'lat': lat, 'lon': lon, 'city': city, 'state': state,
+                'source': 'org-hq', 'matched_name': best.get('name')}
+    except Exception as e:
+        print(f"  Org HQ lookup failed: {e}")
+        return None
+
 def compute_center(geocoded, geocoded_center=None, center_city=None,
-                   center_state=None, center_lat=None, center_lon=None):
+                   center_state=None, center_lat=None, center_lon=None,
+                   org_name=None):
     """Decide the Regional/Local map center. Priority:
        1. center_zip (already matched to a real donor upstream)
        2. explicit center_lat / center_lon
        3. center_city + center_state (offline centroid)
-       4. density-based auto-detect (densest metro cluster)."""
+       4. org_name -> nonprofit HQ via ProPublica (where the org IS)
+       5. density-based auto-detect (densest metro cluster)."""
     if geocoded_center:
         return geocoded_center
 
@@ -333,6 +393,12 @@ def compute_center(geocoded, geocoded_center=None, center_city=None,
             return {'lat': lat, 'lon': lon, 'city': center_city,
                     'state': center_state, 'source': 'city'}
         print(f"  Specified center city not found: {center_city}, {center_state} - using auto-detect")
+
+    if org_name:
+        org_center = lookup_org_center(org_name)
+        if org_center:
+            return org_center
+        print(f"  Falling back to density auto-detect for '{org_name}'")
 
     lat, lon, size = density_center(geocoded)
     place = nearest_place(geocoded, lat, lon)
@@ -581,6 +647,7 @@ def generate_from_file():
         center_state = data.get('center_state', None)
         center_lat = data.get('center_lat', None)
         center_lon = data.get('center_lon', None)
+        org_name = data.get('org_name', None)
         major_donors_csv = data.get('major_donors_csv', None)
 
         if not csv_file_path or not output_directory:
@@ -642,8 +709,17 @@ def generate_from_file():
             write_no_maps_marker(output_directory, 'No addresses could be geocoded')
             return jsonify({'success': False, 'error': 'No addresses could be geocoded'}), 400
 
+        # If no explicit center was given, derive the org name from the
+        # output path and look up its HQ so national orgs center on home
+        # base rather than their densest donor metro.
+        if not org_name:
+            org_name = org_name_from_path(output_directory)
+            if org_name:
+                print(f"Org name from path: {org_name}")
+
         center_point = compute_center(geocoded, geocoded_center, center_city,
-                                      center_state, center_lat, center_lon)
+                                      center_state, center_lat, center_lon,
+                                      org_name)
 
         print("\nGenerating maps...")
         print("  All Donors view...")
@@ -716,6 +792,13 @@ def generate_from_file():
             'addresses_processed': len(geocoded),
             'total_addresses': len(addresses),
             'precision': geocode_stats,
+            'center': {
+                'lat': center_point['lat'],
+                'lon': center_point['lon'],
+                'city': center_point.get('city', ''),
+                'state': center_point.get('state', ''),
+                'source': center_point.get('source', '')
+            },
             'processing_time': round(total_time, 1)
         })
 
