@@ -45,15 +45,24 @@ Generates all maps from a CSV file on disk.
 {
   "csv_file_path": "C:/DonorMaps/donors.csv",
   "output_directory": "C:/DonorMaps/output",
-  "center_zip": "19104",
+  "center_city": "Chicago",
+  "center_state": "Illinois",
   "major_donors_csv": "C:/DonorMaps/major_donors.csv"
 }
 ```
 
 - `csv_file_path` (required) — path to the donor CSV
 - `output_directory` (required) — where generated maps are written (created if missing)
-- `center_zip` (optional) — ZIP code to center the Regional/Local maps on
 - `major_donors_csv` (optional) — separate CSV for the Major Donors map
+
+**Centering the Regional/Local maps** — the center is chosen by the first of these that is provided:
+
+1. `center_zip` — a ZIP code (finds a donor in that ZIP)
+2. `center_lat` + `center_lon` — exact coordinates
+3. `center_city` + `center_state` — resolved offline (accepts full name or 2-letter code)
+4. *nothing* — automatic density-based detection (the densest metro cluster of donors)
+
+**Recommended: set the center to the org's headquarters** (`center_city`/`center_state`). Automatic detection finds where donors are *densest*, which for a national org is often a major metro (NYC, LA) rather than the org's home town. Only the explicit center reliably puts the Regional/Local maps where you mean them to be.
 
 **CSV format:** delimiter is auto-detected (comma or tab), first row is treated as a header, and at least 6 columns are expected: `ID, Name, Street, City, State, Zip, Giving`.
 
@@ -157,14 +166,18 @@ type C:\DonorMaps\service_error.log
 
 ### Center Selection
 
-1. **Manual:** Pass `center_zip` parameter (e.g., "19104")
-   - System finds first address with that ZIP code
-   - Uses as regional/local center
+**Manual (recommended):** Pass the org's location and it is used directly:
+- `center_zip` — first donor found in that ZIP
+- `center_lat` + `center_lon` — exact coordinates
+- `center_city` + `center_state` — offline centroid lookup
 
-2. **Automatic:** If no `center_zip` provided
-   - Counts occurrences of each ZIP code
-   - Selects ZIP with most addresses
-   - Uses first address with that ZIP as center
+**Automatic:** If no center is given, the system finds the **densest metro cluster**
+of donors — it bins geocoded donors into a grid and picks the neighborhood with the
+most donors, then centers on that neighborhood's average location. This is robust
+against a single dense outlier ZIP (e.g. a Florida retirement community) skewing the
+center. Note, however, that "where donors are densest" is not always "where the org
+is" — a national org's donors may concentrate in a major metro far from headquarters.
+For predictable results, set the center explicitly.
 
 ### Exclusions
 

@@ -47,6 +47,31 @@ def load_centroids():
 
 load_centroids()
 
+# Full state name -> USPS 2-letter code, so CSVs that spell states out
+# ("Illinois") match the 2-letter keys in the city centroid table.
+STATE_ABBREV = {
+    'ALABAMA': 'AL', 'ALASKA': 'AK', 'ARIZONA': 'AZ', 'ARKANSAS': 'AR',
+    'CALIFORNIA': 'CA', 'COLORADO': 'CO', 'CONNECTICUT': 'CT', 'DELAWARE': 'DE',
+    'DISTRICT OF COLUMBIA': 'DC', 'FLORIDA': 'FL', 'GEORGIA': 'GA', 'HAWAII': 'HI',
+    'IDAHO': 'ID', 'ILLINOIS': 'IL', 'INDIANA': 'IN', 'IOWA': 'IA', 'KANSAS': 'KS',
+    'KENTUCKY': 'KY', 'LOUISIANA': 'LA', 'MAINE': 'ME', 'MARYLAND': 'MD',
+    'MASSACHUSETTS': 'MA', 'MICHIGAN': 'MI', 'MINNESOTA': 'MN', 'MISSISSIPPI': 'MS',
+    'MISSOURI': 'MO', 'MONTANA': 'MT', 'NEBRASKA': 'NE', 'NEVADA': 'NV',
+    'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ', 'NEW MEXICO': 'NM', 'NEW YORK': 'NY',
+    'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', 'OHIO': 'OH', 'OKLAHOMA': 'OK',
+    'OREGON': 'OR', 'PENNSYLVANIA': 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC',
+    'SOUTH DAKOTA': 'SD', 'TENNESSEE': 'TN', 'TEXAS': 'TX', 'UTAH': 'UT',
+    'VERMONT': 'VT', 'VIRGINIA': 'VA', 'WASHINGTON': 'WA', 'WEST VIRGINIA': 'WV',
+    'WISCONSIN': 'WI', 'WYOMING': 'WY', 'PUERTO RICO': 'PR',
+}
+
+def state_abbrev(state):
+    """Return a 2-letter USPS code from either a full name or an abbreviation."""
+    s = (state or '').strip().upper()
+    if len(s) == 2:
+        return s
+    return STATE_ABBREV.get(s, s)
+
 def parse_giving(value):
     """Parse a giving amount like '$1,234.56' to float; 0 if unparseable"""
     try:
@@ -108,24 +133,17 @@ def parse_addresses(data, center_zip=None):
 
     print(f"Parsed {len(addresses)} valid addresses from file")
 
-    # Find the ZIP with the most addresses
-    if addresses:
-        if center_zip:
-            for addr in addresses:
-                if addr['zip'].startswith(center_zip):
-                    center_address = addr
-                    print(f"Using specified center ZIP: {center_zip}")
-                    break
-
-        if not center_address and zip_counts:
-            most_common_zip = max(zip_counts, key=zip_counts.get)
-            count = zip_counts[most_common_zip]
-            print(f"Auto-selected center ZIP: {most_common_zip} ({count} addresses)")
-
-            for addr in addresses:
-                if addr['zip'] == most_common_zip:
-                    center_address = addr
-                    break
+    # Only resolve an explicit center ZIP here. Automatic centering is
+    # computed from geocoded coordinates AFTER geocoding (density-based),
+    # which is far more robust than picking the single most-common ZIP -
+    # a metro spread across many ZIPs would otherwise lose to one dense
+    # ZIP (e.g. a Florida retirement community).
+    if addresses and center_zip:
+        for addr in addresses:
+            if addr['zip'].startswith(center_zip):
+                center_address = addr
+                print(f"Using specified center ZIP: {center_zip}")
+                break
 
     return addresses, center_address
 
@@ -164,10 +182,11 @@ def lookup_centroid(addr):
     if addr['zip'] and addr['zip'] in ZIP_CENTROIDS:
         lat, lon = ZIP_CENTROIDS[addr['zip']]
         return lat, lon, 'zip'
-    key = (addr['city'].upper(), addr['state'].upper())
-    if addr['city'] and addr['state'] and key in CITY_CENTROIDS:
-        lat, lon = CITY_CENTROIDS[key]
-        return lat, lon, 'city'
+    if addr['city'] and addr['state']:
+        key = (addr['city'].strip().upper(), state_abbrev(addr['state']))
+        if key in CITY_CENTROIDS:
+            lat, lon = CITY_CENTROIDS[key]
+            return lat, lon, 'city'
     return None, None, None
 
 # Jitter (std dev in degrees) by placement precision, so centroid-placed
@@ -253,6 +272,74 @@ def geocode_addresses(addresses, center_address=None):
           f"{stats['city']} city centroid, {stats['failed']} failed")
 
     return geocoded, geocoded_center, stats
+
+def density_center(geocoded, cell=0.35):
+    """Find the center of the densest metro cluster of donors.
+
+    Bins points into a ~24-mile grid and scores each cell by the donor
+    count in its 3x3 neighborhood, then returns the mean location of the
+    points in the winning neighborhood. This favors a metro spread across
+    many ZIPs over a single dense ZIP, so a national org's maps center on
+    its true population core rather than an outlier concentration.
+    Returns (lat, lon, cluster_size)."""
+    from collections import defaultdict
+
+    grid = defaultdict(list)
+    for d in geocoded:
+        key = (int(np.floor(d['lat'] / cell)), int(np.floor(d['lon'] / cell)))
+        grid[key].append(d)
+
+    best_key, best_score = None, -1
+    for (gy, gx) in grid:
+        score = sum(len(grid.get((gy + dy, gx + dx), []))
+                    for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+        if score > best_score:
+            best_score, best_key = score, (gy, gx)
+
+    gy, gx = best_key
+    cluster = [d for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+               for d in grid.get((gy + dy, gx + dx), [])]
+    lat = float(np.mean([d['lat'] for d in cluster]))
+    lon = float(np.mean([d['lon'] for d in cluster]))
+    return lat, lon, len(cluster)
+
+def nearest_place(geocoded, lat, lon):
+    """Return the geocoded donor closest to (lat, lon), for labeling."""
+    return min(geocoded, key=lambda d: (d['lat'] - lat) ** 2 + (d['lon'] - lon) ** 2)
+
+def compute_center(geocoded, geocoded_center=None, center_city=None,
+                   center_state=None, center_lat=None, center_lon=None):
+    """Decide the Regional/Local map center. Priority:
+       1. center_zip (already matched to a real donor upstream)
+       2. explicit center_lat / center_lon
+       3. center_city + center_state (offline centroid)
+       4. density-based auto-detect (densest metro cluster)."""
+    if geocoded_center:
+        return geocoded_center
+
+    if center_lat is not None and center_lon is not None:
+        try:
+            print(f"  Center: explicit coordinates {center_lat}, {center_lon}")
+            return {'lat': float(center_lat), 'lon': float(center_lon),
+                    'city': '', 'state': '', 'source': 'coordinates'}
+        except (TypeError, ValueError):
+            print("  Ignoring invalid center_lat/center_lon")
+
+    if center_city and center_state:
+        key = (center_city.strip().upper(), state_abbrev(center_state))
+        if key in CITY_CENTROIDS:
+            lat, lon = CITY_CENTROIDS[key]
+            print(f"  Center: specified city {center_city}, {center_state}")
+            return {'lat': lat, 'lon': lon, 'city': center_city,
+                    'state': center_state, 'source': 'city'}
+        print(f"  Specified center city not found: {center_city}, {center_state} - using auto-detect")
+
+    lat, lon, size = density_center(geocoded)
+    place = nearest_place(geocoded, lat, lon)
+    print(f"  Center: auto-detected near {place.get('city', '')}, {place.get('state', '')} "
+          f"({size} donors in cluster)")
+    return {'lat': lat, 'lon': lon, 'city': place.get('city', ''),
+            'state': place.get('state', ''), 'source': 'auto-density'}
 
 def create_folium_map(data, zoom_level='continental', output_file='heatmap.png', center_address=None):
     """Create map using Folium and convert to PNG using Playwright"""
@@ -490,6 +577,10 @@ def generate_from_file():
         csv_file_path = data.get('csv_file_path')
         output_directory = data.get('output_directory')
         center_zip = data.get('center_zip', None)
+        center_city = data.get('center_city', None)
+        center_state = data.get('center_state', None)
+        center_lat = data.get('center_lat', None)
+        center_lon = data.get('center_lon', None)
         major_donors_csv = data.get('major_donors_csv', None)
 
         if not csv_file_path or not output_directory:
@@ -551,13 +642,13 @@ def generate_from_file():
             write_no_maps_marker(output_directory, 'No addresses could be geocoded')
             return jsonify({'success': False, 'error': 'No addresses could be geocoded'}), 400
 
-        if geocoded_center:
-            print(f"Center: {geocoded_center['city']}, {geocoded_center['state']}")
+        center_point = compute_center(geocoded, geocoded_center, center_city,
+                                      center_state, center_lat, center_lon)
 
         print("\nGenerating maps...")
         print("  All Donors view...")
         continental_file = os.path.join(output_directory, 'All Donors.png')
-        create_folium_map(geocoded, 'continental', continental_file, geocoded_center)
+        create_folium_map(geocoded, 'continental', continental_file, center_point)
 
         # Generate Major Donors map if file provided
         major_donors_file = None
@@ -594,15 +685,15 @@ def generate_from_file():
 
         print("  Regional view...")
         regional_file = os.path.join(output_directory, 'Regional Donors.png')
-        create_folium_map(geocoded, 'regional', regional_file, geocoded_center)
+        create_folium_map(geocoded, 'regional', regional_file, center_point)
 
         print("  Local view...")
         local_file = os.path.join(output_directory, 'Local Donors.png')
-        create_folium_map(geocoded, 'local', local_file, geocoded_center)
+        create_folium_map(geocoded, 'local', local_file, center_point)
 
         print("  Interactive HTML...")
         interactive_file = os.path.join(output_directory, 'Interactive Donor Map.html')
-        create_interactive_html(geocoded, interactive_file, geocoded_center)
+        create_interactive_html(geocoded, interactive_file, center_point)
 
         total_time = time.time() - start_time
         print(f"\n{'='*70}")
