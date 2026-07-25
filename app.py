@@ -177,6 +177,74 @@ def geocode_address_census(street, city, state, zipcode):
     except Exception as e:
         return None, None
 
+# Census batch geocoder: one request geocodes up to 10,000 addresses,
+# vastly faster than one request per address. We chunk below that limit
+# and run several chunks concurrently.
+BATCH_URL = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
+BATCH_CHUNK = 3000        # addresses per request (well under the 10k cap)
+BATCH_WORKERS = 4         # chunks in flight at once
+BATCH_TIMEOUT = 300       # seconds per chunk
+
+def _geocode_batch_chunk(indexed_chunk):
+    """Geocode one chunk via the Census batch endpoint.
+    indexed_chunk: list of (index, addr). Returns {index: (lat, lon)} for
+    matched addresses. Raises on a request/HTTP failure so the caller can
+    fall back."""
+    buf = StringIO()
+    writer = csv.writer(buf)
+    for idx, a in indexed_chunk:
+        writer.writerow([idx, a['street'], a['city'], a['state'], a['zip']])
+    payload = buf.getvalue().encode('utf-8')
+
+    resp = requests.post(
+        BATCH_URL,
+        files={'addressFile': ('addresses.csv', payload, 'text/csv')},
+        data={'benchmark': 'Public_AR_Current'},
+        timeout=BATCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+
+    results = {}
+    for row in csv.reader(StringIO(resp.text)):
+        # Match rows: id, input, "Match", matchtype, matched addr, "lon,lat", ...
+        if len(row) >= 6 and row[2] == 'Match':
+            try:
+                lon, lat = row[5].split(',')
+                results[int(row[0])] = (float(lat), float(lon))
+            except (ValueError, IndexError):
+                continue
+    return results
+
+def geocode_full_batch(full):
+    """Geocode all full street addresses via the Census batch API.
+    Returns {index: (lat, lon)} keyed by position in `full`. A chunk that
+    fails outright falls back to per-address geocoding so one bad batch
+    doesn't lose those donors."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    chunks = []
+    for start in range(0, len(full), BATCH_CHUNK):
+        end = min(start + BATCH_CHUNK, len(full))
+        chunks.append([(i, full[i]) for i in range(start, end)])
+
+    matches = {}
+    done = 0
+    with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as executor:
+        future_to_chunk = {executor.submit(_geocode_batch_chunk, c): c for c in chunks}
+        for future in as_completed(future_to_chunk):
+            chunk = future_to_chunk[future]
+            try:
+                matches.update(future.result())
+            except Exception as e:
+                print(f"  Batch chunk failed ({e}); falling back to per-address for {len(chunk)}")
+                for idx, a in chunk:
+                    lat, lon = geocode_address_census(a['street'], a['city'], a['state'], a['zip'])
+                    if lat and lon:
+                        matches[idx] = (lat, lon)
+            done += 1
+            print(f"  Batch {done}/{len(chunks)} chunks done ({len(matches)} matched so far)")
+    return matches
+
 def lookup_centroid(addr):
     """Resolve a partial address to a ZIP or city centroid.
     Returns (lat, lon, precision) or (None, None, None)."""
@@ -195,11 +263,9 @@ def lookup_centroid(addr):
 JITTER = {'address': 0.0001, 'zip': 0.008, 'city': 0.02}
 
 def geocode_addresses(addresses, center_address=None):
-    """Geocode addresses: Census API for full street addresses (parallel),
+    """Geocode addresses: Census batch API for full street addresses,
     offline ZIP/city centroids for partial ones (and as fallback when the
     Census API finds no match)."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     geocoded = []
     geocoded_center = None
     stats = {'address': 0, 'zip': 0, 'city': 0, 'failed': 0}
@@ -227,42 +293,25 @@ def geocode_addresses(addresses, center_address=None):
             if stats['failed'] <= 5:
                 print(f"  No centroid for: {addr['city']}, {addr['state']} {addr['zip']}")
 
-    print(f"Geocoding {len(full)} full addresses using Census API "
+    print(f"Geocoding {len(full)} full addresses via Census batch API "
           f"({len(partial)} partial addresses via centroids)...")
     start_time = time.time()
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_addr = {
-            executor.submit(geocode_address_census, addr['street'], addr['city'], addr['state'], addr['zip']): addr
-            for addr in full
-        }
+    matches = geocode_full_batch(full) if full else {}
 
-        completed = 0
-        for future in as_completed(future_to_addr):
-            addr = future_to_addr[future]
-            completed += 1
-
-            if completed % 100 == 0 or completed == len(full):
-                elapsed = time.time() - start_time
-                rate = completed / elapsed if elapsed > 0 else 0
-                print(f"  Progress: {completed}/{len(full)} ({rate:.1f} req/sec, {elapsed:.1f}s elapsed)")
-
-            try:
-                lat, lon = future.result()
-            except Exception:
-                lat, lon = None, None
-
-            if lat and lon:
-                place(addr, lat, lon, 'address')
+    for idx, addr in enumerate(full):
+        if idx in matches:
+            lat, lon = matches[idx]
+            place(addr, lat, lon, 'address')
+        else:
+            # No Census match - fall back to ZIP/city centroid
+            lat, lon, precision = lookup_centroid(addr)
+            if lat is not None:
+                place(addr, lat, lon, precision)
             else:
-                # No Census match - fall back to ZIP/city centroid
-                lat, lon, precision = lookup_centroid(addr)
-                if lat is not None:
-                    place(addr, lat, lon, precision)
-                else:
-                    stats['failed'] += 1
-                    if stats['failed'] <= 5:
-                        print(f"  Failed: {addr['street']}, {addr['city']}, {addr['state']} {addr['zip']}")
+                stats['failed'] += 1
+                if stats['failed'] <= 5:
+                    print(f"  Failed: {addr['street']}, {addr['city']}, {addr['state']} {addr['zip']}")
 
     success_rate = (len(geocoded) / len(addresses)) * 100 if addresses else 0
     total_time = time.time() - start_time

@@ -145,12 +145,15 @@ type C:\DonorMaps\service_error.log
 
 ## Performance Metrics
 
-- **Geocoding rate:** 4-5 addresses/second (Census API dependent)
-- **Processing time for 500 addresses:** ~2-3 minutes
-- **PNG generation per map:** ~10-15 seconds
-- **Total latency (end-to-end):** ~156 seconds for 512 addresses
+Geocoding uses the **Census batch endpoint** — one request geocodes up to 10,000
+addresses instead of one request per address. Full addresses are split into chunks
+of 3,000 and several chunks run concurrently, so a 12,000-address file geocodes in
+a few minutes rather than ~40. Any address the batch can't match falls back to a
+ZIP/city centroid (offline), and if a whole chunk request fails it falls back to
+per-address geocoding so no donors are lost.
 
-**Bottleneck:** Census Geocoding API (external, rate varies)
+- **PNG generation per map:** ~10-15 seconds
+- **Bottleneck:** Census batch API response time (external, varies with load)
 
 ---
 
