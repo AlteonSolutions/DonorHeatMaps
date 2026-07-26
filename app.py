@@ -10,6 +10,7 @@ import numpy as np
 import folium
 from folium.plugins import HeatMap, MarkerCluster
 import os
+import sys
 import asyncio
 from playwright.async_api import async_playwright
 import requests
@@ -17,6 +18,14 @@ import time
 import csv
 import re
 from io import StringIO
+
+# Line-buffer stdout/stderr so progress shows up in the service log in real
+# time (NSSM redirects to a file, where Python would otherwise block-buffer).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except AttributeError:
+    pass
 
 app = Flask(__name__)
 CORS(app)
@@ -476,8 +485,10 @@ def compute_center(geocoded, geocoded_center=None, center_city=None,
     return {'lat': lat, 'lon': lon, 'city': place.get('city', ''),
             'state': place.get('state', ''), 'source': 'auto-density'}
 
-def create_folium_map(data, zoom_level='continental', output_file='heatmap.png', center_address=None):
-    """Create map using Folium and convert to PNG using Playwright"""
+def build_folium_map(data, zoom_level='continental', output_file='heatmap.png', center_address=None):
+    """Build the Folium map and save it as HTML. Returns (html_file, png_file)
+    for deferred rendering, or None if there is no data. Rendering is separated
+    out so all maps can be screenshotted concurrently in one browser."""
 
     if not data:
         return None
@@ -553,17 +564,49 @@ def create_folium_map(data, zoom_level='continental', output_file='heatmap.png',
 
     html_file = output_file.replace('.png', '.html')
     m.save(html_file)
-    print(f"  Saved HTML: {html_file}")
+    print(f"  Built map HTML: {os.path.basename(html_file)}")
 
+    return (html_file, output_file)
+
+def render_maps(jobs):
+    """Render a list of (html_file, png_file) pairs to PNG concurrently using a
+    single headless browser, then delete the intermediate HTML files. Rendering
+    all maps together overlaps the per-map tile-download waits and avoids
+    launching Chromium once per map."""
+    jobs = [j for j in jobs if j]
+    if not jobs:
+        return
+    asyncio.run(_render_maps_async(jobs))
+    for html_file, _ in jobs:
+        try:
+            os.remove(html_file)
+        except OSError:
+            pass
+
+async def _render_maps_async(jobs):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        try:
+            await asyncio.gather(*[_render_one(browser, h, png) for h, png in jobs])
+        finally:
+            await browser.close()
+
+async def _render_one(browser, html_file, png_file):
+    page = await browser.new_page(viewport={'width': 1920, 'height': 1080})
     try:
-        asyncio.run(html_to_png(html_file, output_file))
-        print(f"  Converted to PNG: {output_file}")
-        os.remove(html_file)
-    except Exception as e:
-        print(f"  Error converting to PNG")
-        raise
-
-    return output_file
+        file_url = f'file:///{os.path.abspath(html_file).replace(chr(92), "/")}'
+        # Wait for map tiles to finish downloading rather than a fixed delay,
+        # so slow tile servers don't produce half-rendered PNGs
+        try:
+            await page.goto(file_url, wait_until='networkidle', timeout=30000)
+        except Exception:
+            await page.goto(file_url)
+            await page.wait_for_timeout(5000)
+        await page.wait_for_timeout(2000)
+        await page.screenshot(path=png_file, full_page=False)
+        print(f"  Rendered PNG: {os.path.basename(png_file)}")
+    finally:
+        await page.close()
 
 def create_interactive_html(data, output_file='interactive_map.html', center_address=None):
     """Create interactive HTML map with heat map toggle"""
@@ -667,28 +710,9 @@ def create_interactive_html(data, output_file='interactive_map.html', center_add
 
     return output_file
 
-async def html_to_png(html_file, png_file):
-    """Convert HTML to PNG using Playwright"""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page(viewport={'width': 1920, 'height': 1080})
-
-        file_url = f'file:///{os.path.abspath(html_file).replace(chr(92), "/")}'
-        # Wait for map tiles to finish downloading rather than a fixed delay,
-        # so slow tile servers don't produce half-rendered PNGs
-        try:
-            await page.goto(file_url, wait_until='networkidle', timeout=30000)
-        except Exception:
-            await page.goto(file_url)
-            await page.wait_for_timeout(5000)
-        await page.wait_for_timeout(2000)
-        await page.screenshot(path=png_file, full_page=False)
-
-        await browser.close()
-
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.1-batch'})
+    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.2-render'})
 
 def write_no_maps_marker(output_directory, reason):
     """Write a marker file so Power Automate can tell maps were not generated"""
@@ -791,9 +815,13 @@ def generate_from_file():
                                       org_name)
 
         print("\nGenerating maps...")
+        # Build each map's HTML, then render all PNGs concurrently in one
+        # browser at the end (rendering is the bulk of the runtime).
+        render_jobs = []
+
         print("  All Donors view...")
         continental_file = os.path.join(output_directory, 'All Donors.png')
-        create_folium_map(geocoded, 'continental', continental_file, center_point)
+        render_jobs.append(build_folium_map(geocoded, 'continental', continental_file, center_point))
 
         # Generate Major Donors map if file provided
         major_donors_file = None
@@ -820,7 +848,7 @@ def generate_from_file():
 
                         if major_geocoded:
                             major_donors_file = os.path.join(output_directory, 'Major Donors.png')
-                            create_folium_map(major_geocoded, 'continental', major_donors_file, major_geocoded_center)
+                            render_jobs.append(build_folium_map(major_geocoded, 'continental', major_donors_file, major_geocoded_center))
                         else:
                             print("    No major donor addresses could be geocoded")
                     else:
@@ -830,11 +858,14 @@ def generate_from_file():
 
         print("  Regional view...")
         regional_file = os.path.join(output_directory, 'Regional Donors.png')
-        create_folium_map(geocoded, 'regional', regional_file, center_point)
+        render_jobs.append(build_folium_map(geocoded, 'regional', regional_file, center_point))
 
         print("  Local view...")
         local_file = os.path.join(output_directory, 'Local Donors.png')
-        create_folium_map(geocoded, 'local', local_file, center_point)
+        render_jobs.append(build_folium_map(geocoded, 'local', local_file, center_point))
+
+        print("  Rendering PNGs concurrently...")
+        render_maps(render_jobs)
 
         print("  Interactive HTML...")
         interactive_file = os.path.join(output_directory, 'Interactive Donor Map.html')

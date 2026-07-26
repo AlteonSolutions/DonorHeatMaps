@@ -152,8 +152,12 @@ a few minutes rather than ~40. Any address the batch can't match falls back to a
 ZIP/city centroid (offline), and if a whole chunk request fails it falls back to
 per-address geocoding so no donors are lost.
 
-- **PNG generation per map:** ~10-15 seconds
-- **Bottleneck:** Census batch API response time (external, varies with load)
+PNG rendering (headless Chromium via Playwright) runs **all maps concurrently in a
+single browser** rather than launching one browser per map sequentially, which
+overlaps the per-map tile-download waits.
+
+- **Bottleneck:** map rendering (Chromium drawing ~10k+ clustered markers) and
+  Census batch API response time (external, varies with load)
 
 ---
 
