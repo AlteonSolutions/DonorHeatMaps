@@ -848,7 +848,12 @@ def generate_from_file():
                 'state': center_point.get('state', ''),
                 'source': center_point.get('source', '')
             },
-            'processing_time': round(total_time, 1)
+            'processing_time': round(total_time, 1),
+            'timings': {
+                'geocode_seconds': round(geocode_time, 1),
+                'render_seconds': round(total_time - geocode_time, 1),
+                'total_seconds': round(total_time, 1)
+            }
         })
 
     except Exception as e:
