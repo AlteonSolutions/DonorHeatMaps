@@ -181,45 +181,68 @@ def geocode_address_census(street, city, state, zipcode):
 # vastly faster than one request per address. We chunk below that limit
 # and run several chunks concurrently.
 BATCH_URL = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
-BATCH_CHUNK = 3000        # addresses per request (well under the 10k cap)
-BATCH_WORKERS = 4         # chunks in flight at once
-BATCH_TIMEOUT = 300       # seconds per chunk
+BATCH_CHUNK = 500         # addresses per request (Census batch is far more
+                          # reliable with small files than near the 10k cap)
+BATCH_WORKERS = 6         # chunks in flight at once
+BATCH_TIMEOUT = 120       # seconds per chunk
+BATCH_RETRIES = 1         # extra attempts on a failed/timed-out chunk
 
 def _geocode_batch_chunk(indexed_chunk):
-    """Geocode one chunk via the Census batch endpoint.
+    """Geocode one chunk via the Census batch endpoint, retrying on failure.
     indexed_chunk: list of (index, addr). Returns {index: (lat, lon)} for
-    matched addresses. Raises on a request/HTTP failure so the caller can
-    fall back."""
+    matched addresses. Raises only after retries are exhausted."""
     buf = StringIO()
     writer = csv.writer(buf)
     for idx, a in indexed_chunk:
         writer.writerow([idx, a['street'], a['city'], a['state'], a['zip']])
     payload = buf.getvalue().encode('utf-8')
 
-    resp = requests.post(
-        BATCH_URL,
-        files={'addressFile': ('addresses.csv', payload, 'text/csv')},
-        data={'benchmark': 'Public_AR_Current'},
-        timeout=BATCH_TIMEOUT,
-    )
-    resp.raise_for_status()
+    last_err = None
+    for attempt in range(BATCH_RETRIES + 1):
+        try:
+            resp = requests.post(
+                BATCH_URL,
+                files={'addressFile': ('addresses.csv', payload, 'text/csv')},
+                data={'benchmark': 'Public_AR_Current'},
+                timeout=BATCH_TIMEOUT,
+            )
+            resp.raise_for_status()
+            results = {}
+            for row in csv.reader(StringIO(resp.text)):
+                # Match rows: id, input, "Match", matchtype, matched, "lon,lat", ...
+                if len(row) >= 6 and row[2] == 'Match':
+                    try:
+                        lon, lat = row[5].split(',')
+                        results[int(row[0])] = (float(lat), float(lon))
+                    except (ValueError, IndexError):
+                        continue
+            return results
+        except Exception as e:
+            last_err = e
+    raise last_err
 
-    results = {}
-    for row in csv.reader(StringIO(resp.text)):
-        # Match rows: id, input, "Match", matchtype, matched addr, "lon,lat", ...
-        if len(row) >= 6 and row[2] == 'Match':
+def _fallback_per_address(chunk):
+    """Parallel per-address geocode for a chunk whose batch request failed,
+    so a bad batch doesn't crawl one address at a time."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    out = {}
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futs = {ex.submit(geocode_address_census, a['street'], a['city'],
+                          a['state'], a['zip']): idx for idx, a in chunk}
+        for f in as_completed(futs):
             try:
-                lon, lat = row[5].split(',')
-                results[int(row[0])] = (float(lat), float(lon))
-            except (ValueError, IndexError):
-                continue
-    return results
+                lat, lon = f.result()
+            except Exception:
+                lat, lon = None, None
+            if lat and lon:
+                out[futs[f]] = (lat, lon)
+    return out
 
 def geocode_full_batch(full):
     """Geocode all full street addresses via the Census batch API.
     Returns {index: (lat, lon)} keyed by position in `full`. A chunk that
-    fails outright falls back to per-address geocoding so one bad batch
-    doesn't lose those donors."""
+    fails even after retries falls back to parallel per-address geocoding so
+    one bad batch neither loses donors nor crawls."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     chunks = []
@@ -236,11 +259,8 @@ def geocode_full_batch(full):
             try:
                 matches.update(future.result())
             except Exception as e:
-                print(f"  Batch chunk failed ({e}); falling back to per-address for {len(chunk)}")
-                for idx, a in chunk:
-                    lat, lon = geocode_address_census(a['street'], a['city'], a['state'], a['zip'])
-                    if lat and lon:
-                        matches[idx] = (lat, lon)
+                print(f"  Batch chunk failed ({e}); per-address fallback for {len(chunk)}")
+                matches.update(_fallback_per_address(chunk))
             done += 1
             print(f"  Batch {done}/{len(chunks)} chunks done ({len(matches)} matched so far)")
     return matches
@@ -668,7 +688,7 @@ async def html_to_png(html_file, png_file):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.0'})
+    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.1-batch'})
 
 def write_no_maps_marker(output_directory, reason):
     """Write a marker file so Power Automate can tell maps were not generated"""
