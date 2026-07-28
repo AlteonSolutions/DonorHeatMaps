@@ -386,6 +386,21 @@ def nearest_place(geocoded, lat, lon):
     """Return the geocoded donor closest to (lat, lon), for labeling."""
     return min(geocoded, key=lambda d: (d['lat'] - lat) ** 2 + (d['lon'] - lon) ** 2)
 
+# Sanity-check a looked-up org HQ against actual donor locations. If almost no
+# donors sit near the HQ, ProPublica likely matched the wrong organization, so
+# we reject the HQ and fall back to density. Threshold is intentionally low so
+# a legitimate HQ is only rejected when it has essentially no nearby donors.
+HQ_CHECK_RADIUS = 0.6      # degrees (~40 miles), roughly the regional view
+HQ_MIN_DONORS = 3          # absolute floor
+HQ_MIN_FRACTION = 0.002    # or 0.2% of donors, whichever is larger
+
+def donors_near(geocoded, lat, lon, radius_deg=HQ_CHECK_RADIUS):
+    """Count donors within radius_deg of (lat, lon) using simple degree
+    distance (good enough for a sanity check)."""
+    r2 = radius_deg ** 2
+    return sum(1 for d in geocoded
+               if (d['lat'] - lat) ** 2 + (d['lon'] - lon) ** 2 <= r2)
+
 def org_name_from_path(output_directory):
     """Best-effort org name from the output path. The expected layout is
     ...\\<Org Name>\\<timestamp>\\Donor Maps, so the org name is the folder
@@ -475,8 +490,19 @@ def compute_center(geocoded, geocoded_center=None, center_city=None,
     if org_name:
         org_center = lookup_org_center(org_name)
         if org_center:
-            return org_center
-        print(f"  Falling back to density auto-detect for '{org_name}'")
+            # Cross-check the HQ against donor density before trusting it
+            near = donors_near(geocoded, org_center['lat'], org_center['lon'])
+            threshold = max(HQ_MIN_DONORS, int(HQ_MIN_FRACTION * len(geocoded)))
+            if near >= threshold:
+                print(f"  Org HQ validated: {near} donors within ~40mi of "
+                      f"{org_center.get('city')}, {org_center.get('state')}")
+                org_center['donors_near'] = near
+                return org_center
+            print(f"  Org HQ {org_center.get('city')}, {org_center.get('state')} has only "
+                  f"{near} donors nearby (need >= {threshold}) - likely the wrong IRS "
+                  f"match; using density instead")
+        else:
+            print(f"  No org HQ match for '{org_name}' - using density auto-detect")
 
     lat, lon, size = density_center(geocoded)
     place = nearest_place(geocoded, lat, lon)
@@ -712,7 +738,7 @@ def create_interactive_html(data, output_file='interactive_map.html', center_add
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.2-render'})
+    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.3-hqcheck'})
 
 def write_no_maps_marker(output_directory, reason):
     """Write a marker file so Power Automate can tell maps were not generated"""
@@ -897,7 +923,8 @@ def generate_from_file():
                 'lon': center_point['lon'],
                 'city': center_point.get('city', ''),
                 'state': center_point.get('state', ''),
-                'source': center_point.get('source', '')
+                'source': center_point.get('source', ''),
+                'donors_near': center_point.get('donors_near')
             },
             'processing_time': round(total_time, 1),
             'timings': {

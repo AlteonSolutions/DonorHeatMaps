@@ -186,6 +186,12 @@ name from the output path and looks up its headquarters via the ProPublica Nonpr
 Explorer API, centering on the org's home city. This directly addresses the "donors
 are densest somewhere the org isn't" problem for national organizations.
 
+**HQ sanity check:** because a name search can occasionally match the wrong nonprofit,
+a looked-up HQ is only used if a meaningful number of donors actually sit near it
+(within ~40 miles). If almost no donors are nearby — a sign ProPublica matched the
+wrong org — the HQ is rejected and the system falls back to density detection. The
+response's `center.donors_near` reports how many donors were near the chosen HQ.
+
 **Density fallback:** If the org can't be matched, the system finds the **densest metro
 cluster** of donors — it bins geocoded donors into a grid and picks the neighborhood
 with the most donors, then centers on that neighborhood's average location. This is
