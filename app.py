@@ -422,41 +422,41 @@ def org_name_from_path(output_directory):
         return None
     return parts[-1]
 
-def lookup_org_center(org_name):
-    """Look up a nonprofit's HQ city/state via the ProPublica Nonprofit
-    Explorer API (free, no key; data sourced from IRS filings) and return a
-    center dict, or None if no confident match. Regional/local maps then
-    center on where the ORG is, not where its donors happen to be densest."""
+def lookup_org_candidates(org_name, limit=6):
+    """Return up to `limit` candidate HQ centers for an org name from the
+    ProPublica Nonprofit Explorer API (free, no key; IRS-sourced), in
+    ProPublica's relevance order. Returning several candidates lets the caller
+    pick the one actually supported by donor locations, so a name collision
+    (e.g. two similarly named nonprofits) doesn't silently pick the wrong org."""
     if not org_name:
-        return None
+        return []
     try:
         resp = requests.get(
             "https://projects.propublica.org/nonprofits/api/v2/search.json",
             params={'q': org_name}, timeout=10)
         if resp.status_code != 200:
             print(f"  Org HQ lookup: ProPublica returned HTTP {resp.status_code}")
-            return None
+            return []
         orgs = resp.json().get('organizations', [])
         if not orgs:
             print(f"  Org HQ lookup: no nonprofit match for '{org_name}'")
-            return None
-        best = orgs[0]
-        city = (best.get('city') or '').strip()
-        state = (best.get('state') or '').strip()
-        if not city or not state:
-            return None
-        key = (city.upper(), state_abbrev(state))
-        if key not in CITY_CENTROIDS:
-            print(f"  Org HQ lookup: matched '{best.get('name')}' in {city}, {state} "
-                  f"but no centroid for that city")
-            return None
-        lat, lon = CITY_CENTROIDS[key]
-        print(f"  Center: org HQ '{best.get('name')}' in {city}, {state} (ProPublica)")
-        return {'lat': lat, 'lon': lon, 'city': city, 'state': state,
-                'source': 'org-hq', 'matched_name': best.get('name')}
+            return []
+        candidates = []
+        for org in orgs[:limit]:
+            city = (org.get('city') or '').strip()
+            state = (org.get('state') or '').strip()
+            if not city or not state:
+                continue
+            key = (city.upper(), state_abbrev(state))
+            if key not in CITY_CENTROIDS:
+                continue
+            lat, lon = CITY_CENTROIDS[key]
+            candidates.append({'lat': lat, 'lon': lon, 'city': city, 'state': state,
+                               'source': 'org-hq', 'matched_name': org.get('name')})
+        return candidates
     except Exception as e:
         print(f"  Org HQ lookup failed: {e}")
-        return None
+        return []
 
 def compute_center(geocoded, geocoded_center=None, center_city=None,
                    center_state=None, center_lat=None, center_lon=None,
@@ -488,21 +488,25 @@ def compute_center(geocoded, geocoded_center=None, center_city=None,
         print(f"  Specified center city not found: {center_city}, {center_state} - using auto-detect")
 
     if org_name:
-        org_center = lookup_org_center(org_name)
-        if org_center:
-            # Cross-check the HQ against donor density before trusting it
-            near = donors_near(geocoded, org_center['lat'], org_center['lon'])
-            threshold = max(HQ_MIN_DONORS, int(HQ_MIN_FRACTION * len(geocoded)))
+        candidates = lookup_org_candidates(org_name)
+        threshold = max(HQ_MIN_DONORS, int(HQ_MIN_FRACTION * len(geocoded)))
+        # Walk candidates in relevance order; take the first whose HQ has real
+        # donor support nearby. This picks the correct org when a name search
+        # ranks a same-named org first (e.g. "A Better Chance" NY vs the NC
+        # "A Better Chance A Better Community").
+        for cand in candidates:
+            near = donors_near(geocoded, cand['lat'], cand['lon'])
             if near >= threshold:
-                print(f"  Org HQ validated: {near} donors within ~40mi of "
-                      f"{org_center.get('city')}, {org_center.get('state')}")
-                org_center['donors_near'] = near
-                return org_center
-            print(f"  Org HQ {org_center.get('city')}, {org_center.get('state')} has only "
-                  f"{near} donors nearby (need >= {threshold}) - likely the wrong IRS "
-                  f"match; using density instead")
+                cand['donors_near'] = near
+                print(f"  Center: org HQ '{cand['matched_name']}' in {cand['city']}, "
+                      f"{cand['state']} ({near} donors nearby)")
+                return cand
+            print(f"  Skipping HQ candidate {cand['city']}, {cand['state']} "
+                  f"({near} donors nearby < {threshold})")
+        if candidates:
+            print(f"  No org HQ candidate has donor support - using density instead")
         else:
-            print(f"  No org HQ match for '{org_name}' - using density auto-detect")
+            print(f"  No usable org HQ for '{org_name}' - using density auto-detect")
 
     lat, lon, size = density_center(geocoded)
     place = nearest_place(geocoded, lat, lon)
@@ -738,7 +742,7 @@ def create_interactive_html(data, output_file='interactive_map.html', center_add
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.3-hqcheck'})
+    return jsonify({'status': 'ok', 'service': 'Donation Heat Map API', 'version': '9.4-hqcandidates'})
 
 def write_no_maps_marker(output_directory, reason):
     """Write a marker file so Power Automate can tell maps were not generated"""

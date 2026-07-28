@@ -186,10 +186,12 @@ name from the output path and looks up its headquarters via the ProPublica Nonpr
 Explorer API, centering on the org's home city. This directly addresses the "donors
 are densest somewhere the org isn't" problem for national organizations.
 
-**HQ sanity check:** because a name search can occasionally match the wrong nonprofit,
-a looked-up HQ is only used if a meaningful number of donors actually sit near it
-(within ~40 miles). If almost no donors are nearby — a sign ProPublica matched the
-wrong org — the HQ is rejected and the system falls back to density detection. The
+**HQ sanity check (donor-validated):** because a name search can match the wrong
+nonprofit — e.g. "A Better Chance" (NY) vs "A Better Chance A Better Community" (NC) —
+the API pulls the top several ProPublica candidates and, in relevance order, picks the
+first whose HQ actually has donor support nearby (donors within ~40 miles clearing a
+small auto-scaling threshold). This selects the *correct* org even when it isn't ranked
+first. If no candidate has donor support, it falls back to density detection. The
 response's `center.donors_near` reports how many donors were near the chosen HQ.
 
 **Density fallback:** If the org can't be matched, the system finds the **densest metro
